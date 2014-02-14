@@ -1,0 +1,559 @@
+#!/usr/bin/perl
+# Bassovac wrapper and make command tree
+#----------------------------------
+# $Authors: Beifang Niu $ Mike Wendl
+# $Date: Wed Jan 22 12:59:27 CST 2014 ( The Jan 22 12:59:27 CST 2014 ) $ 
+# $Revision:  $
+# $URL: $
+#----------------------------------
+use strict;
+use warnings;
+
+#----------------------------------
+# Run Bassovac class
+#----------------------------------
+package RunBassovac;
+
+use Cwd;
+use Carp;
+use FileHandle;
+use IO::File;
+use Getopt::Long;
+use POSIX qw( WIFEXITED );
+
+sub new {
+    my $class = shift;
+    my $this = {};
+    # required args
+    map{ $this->{'re_args'}->{$_} = undef 
+    } qw( _fasta 
+          _normal_bam
+          _tumor_bam
+          _normal_purity
+          _tumor_purity
+          _tumor_mass_fraction );  
+    # optional args
+    my %op_args = ('_output_file'        => '-', 
+                   '_bins'               => 2, 
+                   '_precision'          => 6, 
+                   '_min_mapqual'        => 0, 
+                   '_min_basequal'       => 0, 
+                   '_normal_het_rate'    => 0.001, 
+                   '_normal_hom_rate'    => 0.0005, 
+                   '_tumor_bg_rate'      => 0.000002, 
+                   '_min_somatic_pvalue' => 0,
+                   '_max_depth'          => 1000000 );
+    # bool args
+    $this->{'bo_args'}->{'_fixed'} = undef;
+    map{ $this->{'op_args'}->{$_} = $op_args{$_} } keys %op_args;
+    bless $this, $class;
+    $this->process();
+
+    return $this;
+}
+
+sub process {
+    my $this = shift;
+    my ( $help, $help_format, $options );
+    unless( @ARGV ) { die $this->help_text(); }
+    $options = GetOptions (
+        'fasta=s'                => \$this->{'re_args'}->{'_fasta'},
+        'normal-bam=s'           => \$this->{'re_args'}->{'_normal_bam'},
+        'tumor-bam=s'            => \$this->{'re_args'}->{'_tumor_bam'},
+        'normal-purity=f'        => \$this->{'re_args'}->{'_normal_purity'},
+        'tumor-purity=f'         => \$this->{'re_args'}->{'_tumor_purity'},
+        'tumor-mass-fraction=f'  => \$this->{'re_args'}->{'_tumor_mass_fraction'},
+        'output-file=s'          => \$this->{'op_args'}->{'_output_file'},
+        'bins=i'                 => \$this->{'op_args'}->{'_bins'},
+        'precision=i'            => \$this->{'op_args'}->{'_precision'},
+        'min-mapqual=i'          => \$this->{'op_args'}->{'_min_mapqual'},
+        'min-basequal=i'         => \$this->{'op_args'}->{'_min_basequal'},
+        'normal-het-rate=f'      => \$this->{'op_args'}->{'_normal_het_rate'},
+        'normal-hom-rate=f'      => \$this->{'op_args'}->{'_normal_hom_rate'},
+        'tumor-bg-rate=f'        => \$this->{'op_args'}->{'_tumor_bg_rate'},
+        'min-somatic-pvalue=f'   => \$this->{'op_args'}->{'_min_somatic_pvalue'},
+        'max-depth=i'            => \$this->{'op_args'}->{'_max_depth'},
+        'fixed'                  => \$this->{'bo_args'}->{'_fixed'},
+
+        'help-format'   => \$help_format,
+        'help' => \$help,
+    );
+    if ( $help ) { print STDERR help_text(); exit 0; }
+    if ( $help_format ) { print STDERR help_format_text(); exit 0;  }
+    unless( $options ) { die $this->help_text(); }
+    # run Bassovac 
+    my $t_cmd = "bassovac ";
+    map { 
+        unless( defined $this->{'re_args'}->{$_} ) { 
+            die "Required arg: $_ should be null !"; 
+        } 
+    } keys %{$this->{'re_args'}};
+    map { 
+        my $arg_type = $_; 
+        map { 
+            my $t_value = $this->{$arg_type}->{$_}; 
+            s/^_/--/; s/_/-/g; $t_cmd .= "$_ $t_value "; 
+        } keys %{ $this->{$_} } 
+    } ('re_args', 'op_args');
+    if ( defined $this->{'bo_args'}->{'_fixed'} ) { $t_cmd .= "--fixed"; };
+    #print $t_cmd."\n";
+    WIFEXITED( system $t_cmd ) or croak "Couldn't run: $t_cmd ($?)"; 
+
+    return 1;
+}
+
+sub help_text {
+    my $this = shift;
+        return <<HELP
+
+Usage: bassovacMate bassovac [options]
+
+Help:
+  --help                 This message
+  --help-format          Describe output format
+  --version              Display version information
+
+Required Arguments:
+  --fasta                Fasta of reference sequence
+  --normal-bam           Sorted .bam/.sam file containing normal reads
+  --tumor-bam            Sorted .bam/.sam file containing tumor reads
+  --normal-purity        Normal purity
+  --tumor-purity         Tumor purity
+  --tumor-mass-fraction  Tumor mass fraction
+
+Optional Arguments:
+  --output-file          output file (empty or - means stdout, which is the default)
+  --bins                 Maximum number of p-value bins to use
+                         Default value '2' if not specified
+  --min-mapqual          Minimum mapping quality for reads
+                         Default value '0' if not specified
+  --min-basequal         Minimum base quality for bases to be considered
+                         Default value '0' if not specified
+  --min-somatic-pvalue   Minimum somatic pvalue for output to be displayed
+                         Default value '0' if not specified
+  --normal-het-rate      Normal heterozygous variant rate
+                         Default value '0.001' if not specified
+  --normal-hom-rate      Normal homozygous variant rate
+                         Default value '0.0005' if not specified
+  --tumor-bg-rate        Tumor background mutation rate
+                         Default value '0.000002' if not specified
+  --precision            Floating point precision of output
+                         Defult value '6' if not specified 
+  --fixed                Use fixed point notation (default=scientific)
+                         Default value 'false' ( default=scientific ) if not specified
+  --max-depth            maximum expected read depth at any given position (used for optimization)
+
+HELP
+
+}
+
+sub help_format_text {
+    my $this = shift;
+        return <<HELP
+
+Bassovac output format (all fields are tab separated):
+
+        1) Sequence name (chromosome)
+        2) Start position (0-based)
+        3) End position (0-based)
+        4) Reference allele
+        5) Normal variant allele
+        6) Tumor variant allele
+        7) Normal base occurrence counts (A,C,G,T)
+        8) Tumor base occurrence counts (A,C,G,T)
+        9) Normal read count at this position
+        10) Normal reads supporting reference at this position
+        11) Tumor read count at this position
+        12) Tumor reads supporting reference at this position
+        13) Probability of homozygous variant
+        14) Probability of heterozygous variant
+        15) Probability of somatic variant
+        16) Probability of loss of heterozygosity event
+        17) Probability of 'uninteresting' event
+
+HELP
+
+}
+
+#----------------------------------
+# PBF = Post Bassovac False-Positve Filter 
+#----------------------------------
+package PBF;
+
+use strict;
+use warnings;
+use List::Util qw( min );
+
+sub new {
+    my $class = shift;
+    my $this = {};
+    bless $this, $class;
+    return $this;
+}
+#  ==================  
+#  PROXIMITY FILTER 2  
+#  ==================  
+#
+# given a call at a current position, this is a hypothesis
+# test that at least 1 other hit lies within a specific
+# number of bases by chance, i.e. that there's a clump of 2
+
+#  THIS FILTER CALCULATES THE *EXACT* TAIL PROBABILITY
+#
+#  SEE "PROXIMITY FILTER FOR BASSOVAC" NOTES PP 4
+#
+#  VARIABLE  MEANING
+#  -----------------------------------------------------------------------------
+#   g        total size of domain, e.g. chromosome or whole genome length
+#   l        total size of the target subdomain, i.e. the distance
+#               between 2 observed calls
+#   n        number of trials, i.e. total calls within the domain
+sub proximity_2_clump {
+    my ( $this, $l, $n, $g ) = @_;
+    my $phi = min ($l, $n, $g);
+    my $alpha = $phi - 1;
+    my $pvalue = 1;
+    eval {
+        for (my $i = $alpha; $i >= 0; $i--) {
+            $pvalue *= ($l-$i)/($i+1);
+            $pvalue *= ($n-$i)/($g-$i);
+            $pvalue = 1 - $pvalue if $i;
+        }
+    };
+    $pvalue = 1 if $pvalue > 1; 
+    $pvalue = 0 if $pvalue < 0;
+
+    return $pvalue;
+}
+
+sub proximity_3_clump_approx {
+    my ( $this, $l, $n, $g ) = @_;
+    my $pval_tail_1_or_more_events = $this->proximity_2_clump($l, $n, $g);
+    my $pvalue = 1;
+    eval {
+        my $factor = $l * $n / $g;
+        my $p_mass_exactly_1_event = $factor * exp (- $factor);
+        my $pvalue = $pval_tail_1_or_more_events - $p_mass_exactly_1_event;
+    };
+    $pvalue = 1 if $pvalue > 1;
+    $pvalue = 0 if $pvalue < 0;
+    
+    return $pvalue;
+}
+
+sub proximity_5_clump_approx {
+    my ( $this, $l, $n, $g ) = @_;
+    my $pval_tail_1_or_more_events = $this->proximity_2_clump($l, $n, $g);
+    my $pvalue = 1;
+    eval {
+        my $factor = $l * $n / $g;
+        my $p_mass_exactly_123_event = $factor * exp (- $factor) * (1 + $factor*(1 + $factor/3)/2);
+        my $pvalue = $pval_tail_1_or_more_events - $p_mass_exactly_123_event;
+    };
+    $pvalue = 1 if $pvalue > 1;
+    $pvalue = 0 if $pvalue < 0;
+    
+    return $pvalue;
+}
+
+#----------------------------------
+# Run Filtering class
+#----------------------------------
+package Filtering;
+
+use Cwd;
+use Carp;
+use FileHandle;
+use IO::File;
+use Getopt::Long;
+use POSIX qw( WIFEXITED );
+use File::Temp qw/ tempfile /;
+use List::Util qw( first max maxstr min minstr reduce shuffle sum );
+
+sub new {
+    my $class = shift;
+    my $this = {};
+    # required args
+    $this->{'_union_file'} = undef;
+    # optional args 
+    $this->{'_union_file_type'} = 'fals_pos_filter_pass';
+    $this->{'_threshold'} = 0.007;
+    $this->{'_remove_tier4_calls'} = 1;
+    $this->{'_noremove_tier4_calls'} = 0;
+
+    bless $this, $class;
+    $this->process();
+
+    return $this;
+}
+
+sub process {
+    my $this = shift;
+    my ( $help, $options );
+    unless( @ARGV ) { die $this->help_text(); }
+    my @union_files = ();
+    $options = GetOptions (
+        'union-file=s'           => \@union_files,
+        'threshold=f'            => \$this->{'_threshold'},
+        'union-file-type=s'      => \$this->{'_union_file_type'},
+        'remove-tier4-calls'     => \$this->{'_remove_tier4_calls'},
+        'noremove-tier4-calls'   => \$this->{'_noremove_tier4_calls'},
+        'help' => \$help,
+    );
+    if ( $help ) { print STDERR $this->help_text(); exit 0; }
+    unless( $options ) { die $this->help_text(); }
+    $this->{'_union_file'} = \@union_files;
+    unless( $this->{'_union_file'} ) { 
+        warn 'You must provide bassovac output files to do unionize ! ', "\n"; 
+        die $this->help_text(); 
+    }
+    unless( scalar(@union_files) > 1 ) { die $this->help_text(); }
+    unless( $this->{'_union_file_type'} eq 'b4fp_filter' || 
+            $this->{'_union_file_type'} eq 'fals_pos_filter_pass' ) {
+        die $this->help_text();    
+    }
+    unless( $this->{'_threshold'} =~ /^0.\d+$/ ) { die "You must provide valid floating number !" };
+    if ( $this->{'_noremove_tier4_calls'} ) { $this->{'_remove_tier4_calls'} = 0 };
+    ### run filtering
+    #
+    # step 2:
+    # PURPOSE: 
+    # unionize the results from the 2 Bassovac uns 
+    my %union_results = ();
+    map { 
+        my $t_fh = IO::File->new( $_ ) or die " could not open $_ for reading $!";
+        map { 
+            chomp; 
+            unless( /^#/ ) { 
+                my ( $chrom, $pos, $pval ) = (split /\t/)[0,2,14];
+                if ( defined $union_results{$chrom}{$pos} ) {
+                    if ( $pval > $union_results{$chrom}{$pos}[1] ) { $union_results{$chrom}{$pos} = [$_, $pval]; }
+                } else { $union_results{$chrom}{$pos} = [$_, $pval]; }
+            }
+        } $t_fh->getlines;
+        $t_fh->close;
+    } @{ $this->{'_union_file'} };
+    my ( undef, $union_output ) = tempfile();
+    my $union_output_fh = IO::File->new( $union_output, ">" ) or die "Temporary file could not be created. $!";
+    $union_output_fh->print( "# THIS IS THE UNION OF BASSOVAC CALLS FROM THESE FILES\n#\n" );
+    $union_output_fh->print( "# FURNISHED IN THE SAME FORMAT AS BASSOVAC OUTPUT ITSELF\n" );
+    $union_output_fh->print( "# script: $0\n#\n" );
+    $union_output_fh->print( "# union of the following Bassovac runs (files):\n#\n" );
+    map { $union_output_fh->print( "#    $_\n#\n"  ) } @{ $this->{'_union_file'} };
+    $union_output_fh->print( "#\n" );
+    $union_output_fh->print( "#  ", "-" x 60, "\n" );
+    map { 
+        my $chr = $_; 
+        map { 
+            $union_output_fh->print( $union_results{$chr}{$_}[0], "\n" ); 
+        } keys %{ $union_results{$chr} } 
+    } keys %union_results;
+    $union_output_fh->close;
+    print STDERR "... Make a union ... Done\n";
+    # step 3:
+    # PURPOSE: 
+    # sort calls and then remove those calls from un-anchored contigs 
+    # --- from what I have seen, these are almost never real 
+    my ( undef, $union_output_sort ) = tempfile();
+    unless( $union_output_sort ) { die " could not create temp file $!" };
+    `joinx sort $union_output > $union_output_sort`;
+    unlink( $union_output );
+    my $union_output_sort_fh = IO::File->new( $union_output_sort ) or die "Temporary file could not be created. $!";
+    my ( undef, $union_output_sort_filtered ) = tempfile();
+    unless( $union_output_sort_filtered ) { die " could not create temp file $!" };
+    my $union_output_sort_filtered_fh = IO::File->new( $union_output_sort_filtered, ">" ) or die "Temporary file could not be created. $!";
+    $union_output_sort_filtered_fh-> print( "# BASSOVAC CALLS REMAINING AFTER APPLYING POSTERIOR CONTIG FILTER\n#\n" );
+    $union_output_sort_filtered_fh-> print( "# script: $0\n#\n" );
+    $union_output_sort_filtered_fh-> print( "# input bassovac file: $union_output_sort\n#\n" );
+    $union_output_sort_filtered_fh-> print( "#\n#\n" );
+    $union_output_sort_filtered_fh-> print( "#  ", "-" x 60, "\n" );
+    $union_output_sort_filtered_fh-> print(
+        grep { 
+            my ($chr) = $_ =~ /^(.*?)\t/; 
+            $chr =~ /^\d+$/ || $chr eq 'X' || $chr eq 'Y';
+        } $union_output_sort_fh->getlines
+    );
+    $union_output_sort_fh->close;
+    $union_output_sort_filtered_fh->close;
+    unlink( $union_output_sort );
+    print STDERR "... Sorting and filtering ... Done\n";
+    # step 4:
+    # PURPOSE: 
+    # remove calls in very close proximity to one another 
+    # --- these are almost never real (with some exceptions, see NOTES)
+    my %proximity_info = ();
+    $union_output_sort_filtered_fh = IO::File->new( $union_output_sort_filtered ) or die "couldn't open sorted and filtered file $!";
+    map {
+        unless( /^#/ ) {
+            my ( $chr, $pos ) = (split /\t/)[0, 2];
+            unless ( defined $proximity_info{$chr}->{'start'} ) {
+                $proximity_info{$chr}{'start'} = $pos;
+                $proximity_info{$chr}{'end'} = $pos;
+            }
+            $proximity_info{$chr}{'end'} = $pos if ( $pos > $proximity_info{$chr}->{'end'} );
+            push @{$proximity_info{$chr}->{'positions'}}, $pos;
+        }
+    
+    } $union_output_sort_filtered_fh->getlines;
+    $union_output_sort_filtered_fh->close;
+    my ( $g_total, $n_total ) = ( 0, 0 );
+    map {
+      $g_total += $proximity_info{$_}{'end'} - $proximity_info{$_}{'start'};
+      $n_total += scalar @{$proximity_info{$_}{'positions'}};
+    } keys %proximity_info;
+    my $cur_chr = "0";
+    my ( $proximity_pval_prev, $proximity_pval_buffer, $i );
+    my %cache = ();
+    my $pbf_ref = PBF->new();
+    my ( undef, $union_output_sort_filtered_proximity ) = tempfile();
+    unless( $union_output_sort_filtered_proximity ) { die " could not create temp file $!" };
+    my $union_output_sort_filtered_proximity_fh = IO::File->new( $union_output_sort_filtered_proximity, ">" ) or die "Temporary file could not be created. $!";
+    $union_output_sort_filtered_proximity_fh->print( "# BASSOVAC CALLS REMAINING AFTER APPLYING 2-CLUMP FILTER\n#\n" );
+    $union_output_sort_filtered_proximity_fh->print( "# script: $0\n#\n" );
+    $union_output_sort_filtered_proximity_fh->print( "# input bassovac file: $union_output_sort_filtered\n#\n" );
+    $union_output_sort_filtered_proximity_fh->print( "#   --threshold: $this->{'_threshold'} \n#\n" );
+    $union_output_sort_filtered_proximity_fh->print( "#\n#\n" );
+    $union_output_sort_filtered_proximity_fh->print( "#  ", "-" x 60, "\n" );
+    $union_output_sort_filtered_fh = IO::File->new( $union_output_sort_filtered ) or die "couldn't open sorted and filtered file $!";
+    while ( <$union_output_sort_filtered_fh> ) {
+        next if /^#/;
+        my ( $chr, $pos ) = (split /\t/)[0, 2];
+        unless ( $cur_chr eq $chr ) {
+            $cur_chr = $chr;
+            $proximity_pval_prev = 999;
+            my $n = scalar @{$proximity_info{$chr}{'positions'}};
+            $i = 0;
+            next unless $n > 1; # CONDITION FOR 2-CLUMP FILTER: SKIP TO NEXT CHROM
+        }
+        my $proximity_pval;
+        if ( $i < $#{$proximity_info{$chr}{'positions'}} ) {
+            my $l = $proximity_info{$chr}{'positions'}[$i+1] - $proximity_info{$chr}{'positions'}[$i];
+            if ( defined $cache{$l} ) {
+                $proximity_pval = $cache{$l};
+            } else {
+                $proximity_pval = $pbf_ref->proximity_2_clump($l, $n_total, $g_total);
+                $cache{$l} = $proximity_pval;
+            }
+            $proximity_pval_buffer = $proximity_pval;
+            unless ($proximity_pval < $proximity_pval_prev) {
+                $proximity_pval = $proximity_pval_prev;
+            }
+        } else { $proximity_pval = $proximity_pval_prev; }
+        $union_output_sort_filtered_proximity_fh->print( $_ ) unless $proximity_pval < $this->{'_threshold'};
+        $proximity_pval_prev = $proximity_pval_buffer;
+        $i++;
+    }
+    $union_output_sort_filtered_fh->close;
+    $union_output_sort_filtered_proximity_fh->close;
+    #`cp $union_output_sort_filtered_proximity aaa.sort.filtered.proximity`;
+    print STDERR "... proximity filtering ... Done\n";
+    # step 5:
+    # PURPOSE: 
+    # remove all tier 4 calls, presuming they will not be validated 
+    # Note: optional
+    my $union_output_sort_filtered_proximity_remove_tier4 = $union_output_sort_filtered_proximity;
+    if { $this->{'_remove_tier4_calls'} } {
+        $union_output_sort_filtered_proximity_remove_tier4 = $this->tier3_calls_removing( $union_output_sort_filtered_proximity );
+    }
+
+    #
+    return 1;
+}
+
+# remove tier 4 calls
+sub tier3_calls_removing {
+    my ( $this, $bassovac_results ) = @_;
+    my ( undef, $t_bed_file ) = tempfile();
+    unless( $t_bed_file ) { die " could not create temp bed file $!" };
+    my $t_bed_file_fh = IO::File->new( $t_bed_file, ">" ) or die "Temporary file could not be created. $!";
+    $t_bed_file_fh->print( "# BED FILE\n#\n" );
+    $t_bed_file_fh->print( "# script: $0\n#\n" );
+    $t_bed_file_fh->print( "# input bassovac file: $bassovac_results\n#\n" );
+    $t_bed_file_fh->print( "#\n#\n" );
+    $t_bed_file_fh->print( "#  ", "-" x 60, "\n" );
+    my $bassovac_result_fh = IO::File->new( $bassovac_results ) or die "can not open bassovac output file. $!";
+    map { 
+        unless( /^#/ ) {  $t_bed_file_fh->print( join("\t",  (split /\t/)[0..2]), "\n" )  } 
+    } $bassovac_result_fh->getlines;
+    $t_bed_file_fh->close;
+    $bassovac_result_fh->close;
+
+
+}
+
+
+
+
+sub help_text {
+    my $this = shift;
+        return <<HELP
+
+Usage: bassovacMate filtering [options]
+
+Help:
+  --help                     This message
+
+Required Arguments:
+  --union-file [list]        List of files to unionize
+
+Optional Arguments:
+  --union-file-type          Type of file to take unions of, either
+                              'b4fp_filter' or 'fals_pos_filter_pass'
+                              Default value 'fals_pos_filter_pass' if not specified
+
+  --threshold                Threshold tail P-value below which the null hypothesis
+                              is rejected, meaning it's very unlikely that the close
+                              proximity of 2 observed calls is explained by chance
+                              and that they should be discarded as false-positives
+                              Default value '0.007' if not specified
+
+  --remove-tier4-calls       Remove all tier 4 calls and presumably not needed if 
+                              processing exome-only sequence 
+                              Defult value 'true' if not specified
+
+  --noremove-tier4-calls     Make --remove-tier4-calls false
+
+
+HELP
+
+}
+
+#----------------------------------
+# Main class
+#----------------------------------
+package main;
+
+my $VERSION = 'V0.1';
+my $subCmd = shift;
+my %cmds = map{ ($_, 1) } qw( bassovac filtering help );
+unless ( defined $subCmd ) { die help_text(); };
+unless ( exists $cmds{$subCmd} ) { warn ' Please give valid sub command ! ', "\n"; die help_text(); }
+SWITCH:{
+    $subCmd eq 'bassovac'  && do { RunBassovac->new();  last SWITCH; };
+    $subCmd eq 'filtering' && do { Filtering->new();    last SWITCH; };
+    $subCmd eq 'help'   && do { die help_text(); last SWITCH; };
+}
+
+sub help_text {
+        return <<HELP        
+Program: bassovacMate - Bassovac wrapper
+Version: $VERSION
+ Author: Beifang Niu && Mike Wendl
+
+Usage:   bassovacMate <command> [options]
+
+Key commands:
+
+bassovac   --  Run Bassovac
+filtering  --  Run post filtering
+
+help    --  this message
+
+SUPPORT
+For user support please mail bniu\@genome.wustl.edu
+
+HELP
+}
+
+1;
+
