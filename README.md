@@ -28,7 +28,11 @@ For user support please mail bniu@genome.wustl.edu
 Install
 -------
 
-        Just run: cpanm 
+        Just run: perl BassovacMate
+
+Note: 
+
+BassovacMate's dependencies:  joinx, windowBed, samtools and bam-readcount0.4
 
 xxx
 
