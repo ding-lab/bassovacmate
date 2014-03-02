@@ -1,5 +1,5 @@
 #!/usr/bin/perl
-# Bassovac wrapper and make command tree
+# Bassovac wrapper
 #----------------------------------
 # $Authors: Beifang Niu $ Mike Wendl
 # $Date: Wed Jan 22 12:59:27 CST 2014 ( The Jan 22 12:59:27 CST 2014 ) $ 
@@ -187,9 +187,75 @@ use List::Util qw( min );
 sub new {
     my $class = shift;
     my $this = {};
+
+    $this->{'p_err'} = undef;
+    $this->{'one_m_pn_times_1_m_4_3_eps'} = undef;
+    $this->{'pt_times_1_m_4_3_eps'} = undef;
+    $this->{'g_0'} = undef;
+    $this->{'g_1'} = undef;
+    $this->{'prior_ratio_somatic_germline'} = undef;
+    $this->{'rho_n_plus_rho_t'} = undef;
+    $this->{'one_m_paralog_p_over_paralog_p'} = undef;
+    $this->{'ln_2'} = undef;
+
     bless $this, $class;
     return $this;
 }
+
+sub set_germline_constants {
+    my ( $this, $q_avg, $p_somatic_a_priori, $p_germ_a_priori, $p_n, $p_t ) = @_;
+    $this->{'p_err'} = 10**(-$q_avg / 10);
+    $this->{'one_m_pn_times_1_m_4_3_eps'} = (1 - $p_n) * (1 - 4 * $this->{'p_err'} / 3);
+    $this->{'pt_times_1_m_4_3_eps'} = $p_t * (1 - 4 * $this->{'p_err'} / 3);
+    $this->{'g_0'} = 0.5 + $this->{'p_err'} / 3;
+    $this->{'g_1'} = 0.5 - $this->{'p_err'} / 3;
+    $this->{'prior_ratio_somatic_germline'} = $p_somatic_a_priori / $p_germ_a_priori;
+}
+
+sub set_paralog_constants {
+    my ( $this, $rho_n, $rho_t, $p_paralog_x_a_priori ) = @_;
+    $this->{'rho_n_plus_rho_t'} = $rho_n + $rho_t;
+    $this->{'ln_2'} = log (2);
+    $this->{'one_m_paralog_p_over_paralog_p'} = (1 - $p_paralog_x_a_priori) / $p_paralog_x_a_priori;
+}
+
+sub posterior_prob_germline {
+    my ( $this, $normal_total, $normal_ref, $tumor_total, $tumor_ref, $tvaf, $use_normal_vaf_only ) = @_;
+    my $p_g_given_d;
+    $use_normal_vaf_only = 0 unless defined $use_normal_vaf_only;
+    my $s_n0 = $tvaf * $this->{'one_m_pn_times_1_m_4_3_eps'} + $this->{'p_err'};
+    my $s_n1 = 1 - $s_n0;
+    my $s_t0 = $tvaf * $this->{'pt_times_1_m_4_3_eps'} + $this->{'p_err'};
+    my $s_t1 = 1 - $s_t0;
+    my $w = $s_n1 / $this->{'g_1'};
+    my $x = $s_n0 / $this->{'g_0'};
+    my $y = $s_t1 / $this->{'g_1'};
+    my $z = $s_t0 / $this->{'g_0'};
+    my $pow;
+    if ( $use_normal_vaf_only ) { $pow = $normal_ref*log($w) + ($normal_total - $normal_ref)*log($x);
+    } else { $pow = $normal_ref*log($w) + ($normal_total - $normal_ref)*log($x) + $tumor_ref*log($y) + ($tumor_total - $tumor_ref)*log($z); }
+    if ( $pow > 700 ) { $p_g_given_d = 0; } else {
+        my $den = $this->{'prior_ratio_somatic_germline'} * exp($pow);
+        $den += 1;
+        $p_g_given_d = 1 / $den;
+    }
+    
+    return $p_g_given_d;
+}
+
+sub posterior_prob_paralog {
+    my ( $this, $normal_total, $tumor_total ) = @_;
+    my $p_l_given_d;
+    my $t_l = $this->{'rho_n_plus_rho_t'} - ($normal_total + $tumor_total)*$this->{'ln_2'};
+    if ( $t_l > 700 ) { $p_l_given_d = 0; } else {
+        my $den = $this->{'one_m_paralog_p_over_paralog_p'} * exp($t_l);
+        $den += 1;
+        $p_l_given_d = 1 / $den;
+    }
+    
+    return $p_l_given_d;
+}
+
 #  ==================  
 #  PROXIMITY FILTER 2  
 #  ==================  
@@ -275,11 +341,50 @@ sub new {
     my $this = {};
     # required args
     $this->{'_union_file'} = undef;
+    $this->{'_tier1_bed'} = undef;
+    $this->{'_tier2_bed'} = undef;
+    $this->{'_tier3_bed'} = undef;
+    $this->{'_tier4_bed'} = undef;
+    $this->{'_dbSNP_file'} = undef;
+    $this->{'_tumor_bam_file'} = undef;
+    $this->{'_reference_file'} = undef;
+    $this->{'_output_file'} = undef;
     # optional args 
     $this->{'_union_file_type'} = 'fals_pos_filter_pass';
     $this->{'_threshold'} = 0.007;
     $this->{'_remove_tier4_calls'} = 1;
     $this->{'_noremove_tier4_calls'} = 0;
+    $this->{'_remove_indel_calls'} = 1;
+    $this->{'_noremove_indel_calls'} = 0;
+    $this->{'_indel_file'} = undef;
+    # paralog and germline filter
+    $this->{'_filter_paralog'} = 1;
+    $this->{'_nofilter_paralog'} = 0;
+    $this->{'_threshold_paralog'} = 0.3;
+    $this->{'_redundancy_normal'} = 72;
+    $this->{'_redundancy_tumor'} = 36;
+    $this->{'_paralog_x_rate'} = 0.001;
+    $this->{'_filter_germline'} = 1;
+    $this->{'_nofilter_germline'} = 0;
+    $this->{'_threshold_germline'} = 0.5;
+    $this->{'_germline_snp_rate'} = 0.000769230769230769;
+    $this->{'_tumor_bg_rate'} = 0.0000001;
+    $this->{'_normal_purity'} = 0.95;
+    $this->{'_tumor_purity'} = 0.85;
+    $this->{'_avg_basequal'} = 28;
+    # traditional filter
+    $this->{'_min_read_pos'} = 0.10;
+    $this->{'_max_read_pos'} = undef;
+    $this->{'_min_strandedness'} = 0.01;
+    $this->{'_max_strandedness'} = undef;
+    $this->{'_min_var_count'} = 1; 
+    $this->{'_max_mm_qualsum_diff'} = 50;
+    $this->{'_min_var_freq'} = 0.005;
+    $this->{'_max_mapqual_diff'} = 20;
+    $this->{'_max_var_mm_qualsum'} = 90;
+    $this->{'_max_readlen_diff'} = 25;
+    $this->{'_min_var_dist_3'} = 0.20;
+    $this->{'_min_homopolymer'} = 5;
 
     bless $this, $class;
     $this->process();
@@ -296,8 +401,44 @@ sub process {
         'union-file=s'           => \@union_files,
         'threshold=f'            => \$this->{'_threshold'},
         'union-file-type=s'      => \$this->{'_union_file_type'},
+        'output-file=s'          => \$this->{'_output_file'},
         'remove-tier4-calls'     => \$this->{'_remove_tier4_calls'},
         'noremove-tier4-calls'   => \$this->{'_noremove_tier4_calls'},
+        'remove-indel-calls'     => \$this->{'_remove_indel_calls'},
+        'noremove-indel-calls'   => \$this->{'_noremove_indel_calls'},
+        'tier1-bed=s'            => \$this->{'_tier1_bed'},
+        'tier2-bed=s'            => \$this->{'_tier2_bed'},
+        'tier3-bed=s'            => \$this->{'_tier3_bed'},
+        'tier4-bed=s'            => \$this->{'_tier4_bed'},
+        'dbSNP-file=s'           => \$this->{'_dbSNP_file'},
+        'indel-file=s'           => \$this->{'_indel_file'},
+        'filter-paralog'         => \$this->{'_filter_paralog'},
+        'nofilter-paralog'       => \$this->{'_nofilter_paralog'},
+        'threshold-paralog=f'    => \$this->{'_threshold_paralog'},
+        'redundancy-normal=i'    => \$this->{'_redundancy_normal'},
+        'redundancy-tumor=i'     => \$this->{'_redundancy_tumor'},
+        'paralog-x-rate=f'       => \$this->{'_paralog_x_rate'},
+        'filter-germline'        => \$this->{'_filter_germline'},
+        'nofilter-germline'      => \$this->{'_nofilter_germline'},
+        'threshold-germline=f'   => \$this->{'_threshold_germline'},
+        'germline-snp-rate=f'    => \$this->{'_germline_snp_rate'},
+        'tumor-bg-rate=f'        => \$this->{'_tumor_bg_rate'},
+        'normal-purity=f'        => \$this->{'_normal_purity'},
+        'tumor-purity=f'         => \$this->{'_tumor_purity'},
+        'avg-basequal=i'         => \$this->{'_avg_basequal'},
+        'tumor-bam-file=s'       => \$this->{'_tumor_bam_file'},
+        'reference-file=s'       => \$this->{'_reference_file'},
+        'min-read-pos=f'         => \$this->{'_min_read_pos'},
+        'min-strandedness=f'     => \$this->{'_min_strandedness'},
+        'min-var-count=i'        => \$this->{'_min_var_count'},
+        'max-mm-qualsum-diff=i'  => \$this->{'_max_mm_qualsum_diff'},
+        'min-var-freq=f'         => \$this->{'_min_var_freq'},
+        'max-mapqual-diff=i'     => \$this->{'_max_mapqual_diff'},
+        'max-var-mm-qualsum=i'   => \$this->{'_max_var_mm_qualsum'},
+        'max-readlen-diff=i'     => \$this->{'_max_readlen_diff'},
+        'min-var-dist-3=f'       => \$this->{'_min_var_dist_3'},
+        'min-homopolymer=i'      => \$this->{'_min_homopolymer'},
+
         'help' => \$help,
     );
     if ( $help ) { print STDERR $this->help_text(); exit 0; }
@@ -314,11 +455,60 @@ sub process {
     }
     unless( $this->{'_threshold'} =~ /^0.\d+$/ ) { die "You must provide valid floating number !" };
     if ( $this->{'_noremove_tier4_calls'} ) { $this->{'_remove_tier4_calls'} = 0 };
+    if ( $this->{'_remove_tier4_calls'} ) {
+        unless( $this->{'_tier1_bed'} and $this->{'_tier2_bed'} and $this->{'_tier3_bed'} and $this->{'_tier4_bed'} ) {
+            die "You must provide valid tier1-tier4 bed files !\n";
+        }
+        unless( -e $this->{'_tier1_bed'} ) { die "Could not locate tier1 bed file !\n" };
+        unless( -e $this->{'_tier2_bed'} ) { die "Could not locate tier2 bed file !\n" };
+        unless( -e $this->{'_tier3_bed'} ) { die "Could not locate tier3 bed file !\n" };
+        unless( -e $this->{'_tier4_bed'} ) { die "Could not locate tier4 bed file !\n" };
+    }
+    # remove calls near indels 
+    if ( $this->{'_noremove_indel_calls'} ) { $this->{'_remove_indel_calls'} = 0 };
+    if ( $this->{'_remove_indel_calls'} ) {
+        unless( $this->{'_indel_file'} ) { die "You must provide valid indel files !\n"; }
+        unless( -e $this->{'_indel_file'} ) { die "Could not locate indel file !\n" };
+    }
+    unless ( $this->{'_dbSNP_file'} ) {  die "You must provide valid dbSNP file !\n"; }
+    unless( -e $this->{'_dbSNP_file'} ) { die "Could not locate dbSNP file !\n" };
+    # valid paralog and germline filters
+    if ( $this->{'_filter_paralog'} ) { $this->{'_nofilter_paralog'} = 0 };
+    if ( $this->{'_filter_germline'} ) { $this->{'_nofilter_germline'} = 0 };
+    # tumor bam file 
+    unless( $this->{'_tumor_bam_file'} ) { die "You must provide valid tumor bam file !\n"; }
+    unless( -e $this->{'_tumor_bam_file'} ) { die "Could not locate tumor bam file !\n" };
+    # reference file 
+    unless( $this->{'_reference_file'} ) { die "You must provide valid reference file !\n"; }
+    unless( -e $this->{'_reference_file'} ) { die "Could not locate reference file !\n" };
+    # traditional filter
+    $this->{'_max_read_pos'} = 1 - $this->{'_min_read_pos'};
+    $this->{'_max_strandedness'} = 1 - $this->{'_min_strandedness'};
+    # final filtered output file 
+    unless( $this->{'_output_file'} ) { die "You must provide final output file !\n"; }
+
+    #my $min_read_pos = $self->min_read_pos;
+    #my $max_read_pos = 1 - $min_read_pos;
+    #my $min_var_freq = $self->min_var_freq;
+    #my $min_var_count = $self->min_var_count;
+    #my $min_strandedness = $self->min_strandedness;
+    #my $max_strandedness = 1 - $min_strandedness;
+
+    #my $max_mm_qualsum_diff = $self->max_mm_qualsum_diff;
+    #my $max_mapqual_diff = $self->max_mapqual_diff;
+    #my $max_readlen_diff = $self->max_readlen_diff;
+    #my $min_var_dist_3 = $self->min_var_dist_3;
+    #my $max_var_mm_qualsum = $self->max_var_mm_qualsum if($self->max_var_mm_qualsum);
+
+
+
+    #
     ### run filtering
     #
     # step 2:
     # PURPOSE: 
     # unionize the results from the 2 Bassovac uns 
+    #
     my %union_results = ();
     map { 
         my $t_fh = IO::File->new( $_ ) or die " could not open $_ for reading $!";
@@ -451,18 +641,489 @@ sub process {
     # PURPOSE: 
     # remove all tier 4 calls, presuming they will not be validated 
     # Note: optional
+    # TODO: how to get sorted bed file if no remove tier4 calls 
+    #
     my $union_output_sort_filtered_proximity_remove_tier4 = $union_output_sort_filtered_proximity;
-    if { $this->{'_remove_tier4_calls'} } {
-        $union_output_sort_filtered_proximity_remove_tier4 = $this->tier3_calls_removing( $union_output_sort_filtered_proximity );
+    my $tier123_sorted_bed;
+    if ( $this->{'_remove_tier4_calls'} ) { 
+        ( $union_output_sort_filtered_proximity_remove_tier4, $tier123_sorted_bed ) = 
+        $this->tier3_calls_removing( $union_output_sort_filtered_proximity, $this->{'_tier1_bed'}, $this->{'_tier2_bed'}, $this->{'_tier3_bed'}, $this->{'_tier4_bed'} );
+    }
+    #`cp $union_output_sort_filtered_proximity_remove_tier4 return_output_file`;
+    #`cp $tier123_sorted_bed return_output_sorted_tier123bed`;
+    # step 6:
+    # PURPOSE: remove DbSNPs and calls near indels --- none of these should be real
+    # Note: indels optional
+    #
+    my ( undef, $bed_sorted_alleles ) = tempfile();
+    unless( $bed_sorted_alleles ) { die " could not create temp sorted bed alleles file $!" };
+    my $bed_sorted_alleles_fh = IO::File->new( $bed_sorted_alleles, ">" ) or die "Temporary file could not be created. $!";
+    my $t_bassovac_results_fh = IO::File->new( $union_output_sort_filtered_proximity_remove_tier4 ) or die "could not open bassocac results file. $!";
+    if ( $this->{'_remove_tier4_calls'} ) {
+        my $t_sorted_bed_fh = IO::File->new( $tier123_sorted_bed ) or die "could not open sorted bed file. $!";
+        while ( <$t_sorted_bed_fh> ) { chomp;
+            my ( $chr_bed, $start_bed, $end_bed ) = split /\t/;
+            while ( <$t_bassovac_results_fh> ) { chomp;
+                my ($chr, $start, $end, $ref, $var) = ( split /\t/ )[0,1,2,3,5];
+                if ( $chr eq $chr_bed && $start == $start_bed && $end == $end_bed ) {
+                    $bed_sorted_alleles_fh->print( "$chr\t$start\t$end\t$ref/$var\n" );
+                    last;
+                }
+            }
+        }
+        $t_sorted_bed_fh->close;
+    } else {
+        #  IF YOU WANT TO DO THIS SAME OPERATION DIRECTLY ON A BASSOVAC FILE (RATHER THAN ITS
+        #  BED FILE) USE THE SCRIPT:
+        #  /gscmnt/sata848/info/bassovac/results_tcga_breast_double_normal/make_dbsnp_input_direct_from_bassovac.pl
+        map { unless( /^#/ ) {
+                my ($chr, $start, $end, $ref, $var) = ( split /\t/ )[0,1,2,3,5];
+                $bed_sorted_alleles_fh->print( "$chr\t$start\t$end\t$ref/$var\n" );
+            }
+        } $t_bassovac_results_fh->getlines;
+    }
+    $t_bassovac_results_fh->close;
+    $bed_sorted_alleles_fh->close;
+    #`cp $bed_sorted_alleles bed_sorted_alleles`;
+    my ( undef, $t_bed_novel_with_alleles ) = tempfile();
+    unless( $t_bed_novel_with_alleles ) { die " could not create temp bed novel with alleles file $!" };
+    my ( undef, $t_bed_dbSNP_with_alleles ) = tempfile();
+    unless( $t_bed_dbSNP_with_alleles ) { die " could not create temp bed dbSNP with alleles file $!" };
+    my $cmd = "joinx intersect --dbsnp-match --miss-a $t_bed_novel_with_alleles $bed_sorted_alleles $this->{'_dbSNP_file'} -o $t_bed_dbSNP_with_alleles";
+    #/usr/bin/joinx1.6 intersect --dbsnp-match --miss-a clump2_whole_genome_1_bin_0_007.txt.bed.tiers123.sorted.novel.with_alleles bed_sorted_alleles /gscmnt/ams1102/info/feature_list/-1305149794-1102-10002/-1305149794-1102-10002.bed -o clump2_whole_genome_1_bin_0_007.txt.bed.tiers123.sorted.dbsnp.with_alleles
+    WIFEXITED( system $cmd ) or croak "Couldn't run: $cmd ($?)";
+
+    #`cp $t_bed_novel_with_alleles t_bed_novel_with_alleles`;
+    #`cp $t_bed_dbSNP_with_alleles t_bed_dbSNP_with_alleles`;
+
+    # INFLATE THE RESULT BACK TO THE FORM OF A BASSOVAC OUTPUT FILE WHICH NOW HAS DBSNPS REMOVED
+    #
+    # /gscmnt/sata848/info/bassovac/results_brc_53/inflate.pl --bassovac-file clump2_whole_genome_1_bin_0_007.txt --seed_file clump2_whole_genome_1_bin_0_007.txt.bed.tiers123.sorted.novel > clump2_whole_genome_1_bin_0_007_tiers123.novel.txt
+    # bassovac bass : $union_output_sort_filtered_proximity
+    # bed: seed : $t_bed_novel_with_alleles
+    my ( %seed, $total_seed, $total_bass ) = ( (), 0, 0 );
+    my $t_seed_novel_fh = IO::File->new( $t_bed_novel_with_alleles ) or die "can not open bed novel file. $!";
+    map { unless( /^#/ ) { 
+            chomp;
+            my ( $chr, $pos ) = (split /\t/)[0,2];
+            $chr =~ s/\s+$//; $pos =~ s/\s+$//;
+            $seed{$chr}{$pos} = 1;
+            $total_seed++;
+        }
+    } $t_seed_novel_fh->getlines;
+    $t_seed_novel_fh->close;
+    my ( undef, $return_output_file ) = tempfile();
+    unless( $return_output_file ) { die " could not create temp return output file $!" };
+    my $return_output_file_fh = IO::File->new( $return_output_file, ">" ) or die "Temporary file could not be created. $!";
+    my $bassovac_result_fh = IO::File->new( $union_output_sort_filtered_proximity ) or die "can not open bassovac output file. $!";
+    map { unless( /^#/ ) {
+            my ( $chr, $pos ) = (split /\t/)[0,2];
+            $chr =~ s/\s+$//; $pos =~ s/\s+$//;
+            if ( defined $seed{$chr}{$pos} ) { $return_output_file_fh->print( $_ ); $total_bass++; }
+        }
+    } $bassovac_result_fh->getlines;
+    die "SEED FILE NOT FULLY INFLATED" unless $total_bass == $total_seed;
+    $bassovac_result_fh->close;
+    $return_output_file_fh->close;
+    #`cp $return_output_file clump2_whole_genome_1_bin_0_007_tiers123.novel.txt.bak`;
+    my $bassovac_filtered_results_step_6 = $return_output_file;
+    ## remove calls near indels
+    if ( $this->{'_remove_indel_calls'} ) {
+        my ( undef, $t_3_col_novel_bed_file ) = tempfile();
+        unless( $t_3_col_novel_bed_file ) { die " could not create temp 3 cols novel bed file $!" };
+        my $t_3_col_novel_bed_file_fh = IO::File->new( $t_3_col_novel_bed_file, ">" ) or die "can not open 3 cols novel alleles file. $!";
+        my $t_novel_bed_fh = IO::File->new( $t_bed_novel_with_alleles ) or die "can not open novel bed witl alleles file. $!";
+        map{ chomp; @_ = split /\t/; $t_3_col_novel_bed_file_fh->print( join( "\t", @_[0..2] ) , "\n" ) } $t_novel_bed_fh->getlines;
+        $t_3_col_novel_bed_file_fh->close;
+        $t_novel_bed_fh->close;
+        #`cp $t_3_col_novel_bed_file clump2_whole_genome_1_bin_0_007.txt.bed.tiers123.sorted.novel.bak`;
+        my ( undef, $t_noindel_bed_file ) = tempfile();
+        unless( $t_noindel_bed_file ) { die " could not create temp nonindel bed file $!" };
+        # windowBed -w 10 -v -b indels.hq.v2.bed -a clump2_whole_genome_1_bin_0_007.txt.bed.tiers123.sorted.novel > clump2_whole_genome_1_bin_0_007.txt.bed.tiers123.sorted.novel.noindels
+        my $t_cmd = "windowBed -w 10 -v -b $this->{'_indel_file'} -a $t_3_col_novel_bed_file > $t_noindel_bed_file";
+        WIFEXITED( system $t_cmd ) or croak "Couldn't run: $t_cmd ($?)";
+        # gmt snp match -f clump2_whole_genome_1_bin_0_007.txt.bed.tiers123.sorted.novel.noindels --start-and-stop clump2_whole_genome_1_bin_0_007_tiers123.novel.txt > clump2_whole_genome_1_bin_0_007_tiers123.novel.no_indels.txt
+        my %t_query_hash = ();
+        my $t_noindel_bed_fh = IO::File->new( $t_noindel_bed_file ) or die "can not open nonindel bed file. $!";
+        map{ chomp; @_ = split /\t/; map { $_ =~ s/\s+//g } @_[0..2]; $t_query_hash{$_[0]}{$_[1]}{$_[2]} = 1; } $t_noindel_bed_fh->getlines;
+        $t_noindel_bed_fh->close;
+        my ( undef, $t_bassovac_filtered_results_step_6 ) = tempfile();
+        unless( $t_bassovac_filtered_results_step_6 ) { die " could not create temp bassovac filtering results step 6 file $!" };
+        my $t_bassovac_filtered_results_step_6_fh = IO::File->new( $t_bassovac_filtered_results_step_6, ">" ) or die "can not open bassovac filtering results step 6 file. $!";
+        my $bassovac_filtered_results_step_6_fh = IO::File->new( $bassovac_filtered_results_step_6 ) or die "can not open bassovac filtering step 6 results file. $!";
+        map {
+           chomp; 
+           my ( $chr, $start, $stop ) = split /\t/;
+           map { $_ =~ s/\s+//g } ( $chr, $start, $stop );
+           if ( exists( $t_query_hash{$chr}{$start}{$stop} ) ) { $t_bassovac_filtered_results_step_6_fh->print( $_, "\n" ) };
+        } $bassovac_filtered_results_step_6_fh->getlines;
+        $t_bassovac_filtered_results_step_6_fh->close;
+        $bassovac_filtered_results_step_6_fh->close;
+        $bassovac_filtered_results_step_6 = $t_bassovac_filtered_results_step_6;
+    }
+    #`cp $bassovac_filtered_results_step_6 step_6_filtered_results `;
+    print STDERR "... snp and indels filtering ... Done\n";
+    #
+    # step 7:
+    # PURPOSE: remove additional paralogs that can be identified based on anomalous sequence depth
+    # Note: indels optional
+    #
+    my $pbf_ref_step7 = PBF->new(); my $p_err;
+    if ( $this->{'_filter_germline'} ) { 
+        #$pbf_ref_step7->set_germline_constants( $q_avg, $p_somatic_a_priori, $p_germ_a_priori, $p_n, $p_t );
+        $pbf_ref_step7->set_germline_constants( $this->{'_avg_basequal'}, $this->{'_tumor_bg_rate'}, $this->{'_germline_snp_rate'}, $this->{'_normal_purity'}, $this->{'_tumor_purity'} );
+        #$p_err = 10**(-$q_avg / 10);
+        $p_err = 10**(-$this->{'_avg_basequal'} / 10);
+    }
+    #if ( $this->{'_filter_paralog'} ) { $pbf_ref_step7->set_paralog_constants( $rho_n, $rho_t, $p_paralog_x_a_priori ); }
+    if ( $this->{'_filter_paralog'} ) { $pbf_ref_step7->set_paralog_constants( $this->{'_redundancy_normal'}, $this->{'_redundancy_tumor'}, $this->{'_paralog_x_rate'} ); }
+    # step 7 and 8 output
+    my ( undef, $t_bassovac_filtered_results_step_7_and_8 ) = tempfile();
+    unless( $t_bassovac_filtered_results_step_7_and_8 ) { die " could not create temp bassovac filtering results step 7 and 8 file $!" };
+    my $t_bassovac_filtered_results_step_7_and_8_fh = IO::File->new( $t_bassovac_filtered_results_step_7_and_8, ">" ) or die "can not open bassovac filtering results step 7 and 8 file. $!";
+    #__PRINT OUTPUT HEADER
+    $t_bassovac_filtered_results_step_7_and_8_fh->print( "# BASSOVAC CALLS REMAINING AFTER APPLYING POST GMT FILTERS\n#\n" );
+    if ( $this->{'_filter_germline'} ) {
+        $t_bassovac_filtered_results_step_7_and_8_fh->print( "# germline filter was run with these parameters\n#\n" );
+        $t_bassovac_filtered_results_step_7_and_8_fh->print( "#   --threshold-germline: $this->{'_threshold_germline'}\n#\n" );
+        $t_bassovac_filtered_results_step_7_and_8_fh->print( "#   --normal-purity: $this->{'_normal_purity'}\n#\n" );
+        $t_bassovac_filtered_results_step_7_and_8_fh->print( "#   --tumor-purity: $this->{'_tumor_purity'}\n#\n" );
+        $t_bassovac_filtered_results_step_7_and_8_fh->print( "#   --avg-basequal: $this->{'_avg_basequal'} (error probability = $p_err)\n#\n" );
+        $t_bassovac_filtered_results_step_7_and_8_fh->print( "#   --germline-snp-rate: $this->{'_germline_snp_rate'}\n#\n" );
+        $t_bassovac_filtered_results_step_7_and_8_fh->print( "#   --tumor-bg-rate: $this->{'_tumor_bg_rate'}\n#\n" );
+    } else { $t_bassovac_filtered_results_step_7_and_8_fh->print( "# germline filter was NOT run\n#\n" ) }
+    if ( $this->{'_filter_paralog'} ) {
+        $t_bassovac_filtered_results_step_7_and_8_fh->print( "# paralog (depth) filter was run with these parameters\n#\n" );
+        $t_bassovac_filtered_results_step_7_and_8_fh->print( "#   --threshold-paralog: $this->{'_threshold_paralog'}\n#\n" );
+        $t_bassovac_filtered_results_step_7_and_8_fh->print( "#   --redundancy-n: $this->{'_redundancy_normal'}\n#\n" );
+        $t_bassovac_filtered_results_step_7_and_8_fh->print( "#   --redundancy-t: $this->{'_redundancy_tumor'}\n#\n" );
+        $t_bassovac_filtered_results_step_7_and_8_fh->print( "#   --paralog-x-rate: $this->{'_paralog_x_rate'}\n#\n" );
+    } else { $t_bassovac_filtered_results_step_7_and_8_fh->print( "# paralog (depth) filter was NOT run\n#\n" ) }
+    $t_bassovac_filtered_results_step_7_and_8_fh->print( "# BASSOVAC CALLS REMAINING AFTER ABOVE POSTERIOR FILTERING\n" );
+    $t_bassovac_filtered_results_step_7_and_8_fh->print( "#\n#\n" );
+    $t_bassovac_filtered_results_step_7_and_8_fh->print( "#  ", "-" x 60, "\n" );
+    my $bassovac_filtered_results_step_6_fh = IO::File->new( $bassovac_filtered_results_step_6 ) or die "can not open bassovac filtering step 6 results file. $!";
+    my ($over_tp, $over_fp) = (0, 0);
+    my @true_positives = ();
+    my @false_positives = ();
+    while ( <$bassovac_filtered_results_step_6_fh> ) {
+        next if /^#/; chomp;
+        my @ts = split /\t/;
+        my ( $chr, $pos ) = ( $ts[0], $ts[2] );
+        my ( $normal_total, $normal_ref ) = ( $ts[8], $ts[9] );
+        my ( $tumor_total, $tumor_ref ) = ( $ts[10], $ts[11] );
+        my $nvaf = ($normal_total - $normal_ref) / $normal_total;
+        my $tvaf = ($tumor_total - $tumor_ref) / $tumor_total;
+        my $p_homozyg = $ts[12];
+        my $p_heterozyg = $ts[13];
+        my ( $prob_paralog, $prob_germline );
+        if ( $this->{'_filter_germline'} ) {
+            $prob_germline = $pbf_ref_step7->posterior_prob_germline( $normal_total, $normal_ref, $tumor_total, $tumor_ref, $tvaf, 1 );
+            unless ( $prob_germline < $this->{'_threshold_germline'} ) { next; }
+        } else { $prob_germline = "n/a"; }
+        if ( $this->{'_filter_paralog'} ) {
+            $prob_paralog = $pbf_ref_step7->posterior_prob_paralog( $normal_total, $tumor_total );
+            unless ( $prob_paralog < $this->{'_threshold_paralog'} ) { next; }
+        } else { $prob_paralog = "n/a"; } 
+        $t_bassovac_filtered_results_step_7_and_8_fh->print( $_, "\n" );
+    }
+    $t_bassovac_filtered_results_step_7_and_8_fh->close;
+    $bassovac_filtered_results_step_6_fh->close;
+    #`cp $t_bassovac_filtered_results_step_7_and_8 step_7_and_8_filtered_results`;
+    #
+    # step 9:
+    # PURPOSE: remove "traditional" false positive calls
+    #
+    my ( undef, $t_variant_file_input ) = tempfile();
+    unless( $t_variant_file_input ) { die " could not create temp variant file input for step 9 file $!" };
+    my $t_variant_file_input_fh = IO::File->new( $t_variant_file_input, ">" ) or die "can not open temp variant file input for step 9 file. $!";
+    $t_bassovac_filtered_results_step_7_and_8_fh = IO::File->new( $t_bassovac_filtered_results_step_7_and_8 ) or die "can not open bassovac results of step 7 and 8 file. $!";
+    map { unless( /^#/ ) { my ( $chr, $start, $stop ) = split /\t/; $start++; $t_variant_file_input_fh->print( "$chr\t$start\t$stop\n" ) } } $t_bassovac_filtered_results_step_7_and_8_fh->getlines;
+    $t_variant_file_input_fh->close;
+    $t_bassovac_filtered_results_step_7_and_8_fh->close;
+    my ( undef, $t_read_count_file ) = tempfile();
+    #`cp $t_variant_file_input step_9_variant_input`;
+    print STDERR "... Runing bam-readcount ....\n";
+    #my $t_cmd = "bam-readcount -f $this->{'_reference_file'} -b 15 $this->{'_tumor_bam_file'} -l $t_variant_file_input > $t_read_count_file 2> /dev/null";
+    my $t_cmd = "bam-readcount0.4 -f $this->{'_reference_file'} -b 15 $this->{'_tumor_bam_file'} -l $t_variant_file_input > $t_read_count_file 2> /dev/null";
+    print STDERR $t_cmd."\n"; 
+    WIFEXITED( system $t_cmd ) or croak "Couldn't run: $t_cmd ($?)";
+    print STDERR "... Runing bam-readcount done ....\n";
+    #`cp $t_read_count_file step_9_readcount_file`;
+    my $t_read_count_file_fh = IO::File->new( $t_read_count_file ) or die "can not open temp read count file. $!";
+    my ( undef, $t_filtered_file ) = tempfile();
+    unless( $t_filtered_file ) { die " could not create temp traditional filtered file for step 9 file $!" };
+    my $t_filtered_file_fh = IO::File->new( $t_filtered_file, ">" ) or die "can not open temp traditional filtered file for step 9 file. $!";
+    my ( undef, $t_output_file_step_9 ) = tempfile();
+    unless( $t_output_file_step_9 ) { die " could not create temp output file of step 9 $!" };
+    my $t_output_file_step_9_fh = IO::File->new( $t_output_file_step_9, ">" ) or die "can not open temp output file of step 9 $!";
+    $t_bassovac_filtered_results_step_7_and_8_fh = IO::File->new( $t_bassovac_filtered_results_step_7_and_8 ) or die "can not open bassovac results of step 7 and 8 file. $!";
+    ## Parse the variants file ##
+    my $lineCounter = 0;
+    while ( <$t_bassovac_filtered_results_step_7_and_8_fh> ) {
+        next if (/^#/); chomp; my $line = $_; $lineCounter++;
+        my ( $chrom, $chr_start, $chr_stop, $ref, undef, $var ) = split /\t/;
+        next unless ( $chr_start =~ /^\d+$/ ); #header line
+        $chr_start++;
+        $ref = uc($ref); $var = uc($var);
+        my $query_string = $chrom . ":" . $chr_start . "-" . $chr_stop;
+        # if the variant allele is an IUPAC code, convert it
+        if ( !($var =~ /[ACGT]/) ) { $var = $this->iupac_to_base( $ref, $var ); }
+        if ( $var =~ /[ACGT]/ ) {
+            # Skip MT chromosome sites,w hich almost always pass
+            if ( $chrom eq "MT" || $chrom eq "chrMT" ) {
+                # Auto-pass it to increase performance
+                $t_output_file_step_9_fh->print( "$line\n" );
+            } else {
+                my $readcounts; my $search_chrom = $chrom;
+                unless( $readcounts = $this->get_readcount_line( $t_read_count_file_fh, $search_chrom, $chr_start ) ) { die "Failed to find readcount data for: " . $search_chrom . "\t" . $chr_start . "\n" ; }
+                # Parse the results for each allele
+                my $ref_result = $this->read_counts_by_allele_old( $readcounts, $ref );
+                my $var_result = $this->read_counts_by_allele_old( $readcounts, $var );
+                if ( $ref_result && $var_result ) {
+                    ## Parse out the bam-readcounts details for each allele. The fields should be
+                    #num_reads : avg_mapqual : avg_basequal : avg_semq : reads_plus : reads_minus : avg_clip_read_pos : avg_mmqs : reads_q2 : avg_dist_to_q2 : avgRLclipped : avg_eff_3'_dist
+                    my ( $ref_count, $ref_map_qual, $ref_base_qual, $ref_semq, $ref_plus, $ref_minus, $ref_pos, $ref_subs, $ref_mmqs, $ref_q2_reads, $ref_q2_dist, $ref_avg_rl, $ref_dist_3 ) = split(/\t/, $ref_result);
+                    my ( $var_count, $var_map_qual, $var_base_qual, $var_semq, $var_plus, $var_minus, $var_pos, $var_subs, $var_mmqs, $var_q2_reads, $var_q2_dist, $var_avg_rl, $var_dist_3 ) = split(/\t/, $var_result);
+                    my $ref_strandedness = my $var_strandedness = 0.50;
+                    $ref_dist_3 = 0.5 if ( !$ref_dist_3 );
+                    # Use conservative defaults if we can't get mismatch quality sums
+                    $ref_mmqs = 50 if ( !$ref_mmqs );
+                    $var_mmqs = 0  if ( !$var_mmqs );
+                    my $mismatch_qualsum_diff = $var_mmqs - $ref_mmqs;
+                    # Determine map qual diff
+                    my $mapqual_diff = $ref_map_qual - $var_map_qual;
+                    # Determine difference in average supporting read length
+                    my $readlen_diff = $ref_avg_rl - $var_avg_rl;
+                    # Determine ref strandedness
+                    if ( ($ref_plus + $ref_minus) > 0 ) {
+                        $ref_strandedness = $ref_plus / ($ref_plus + $ref_minus);
+                        $ref_strandedness = sprintf( "%.2f", $ref_strandedness );
+                    }
+                    # Determine var strandedness
+                    if ( ($var_plus + $var_minus) > 0) {
+                        $var_strandedness = $var_plus / ($var_plus + $var_minus);
+                        $var_strandedness = sprintf( "%.2f", $var_strandedness );
+                    }
+                    if ( $var_count && ($var_plus + $var_minus) ) {
+                        # We must obtain variant read counts to proceed
+                        my $var_freq = $var_count / ($ref_count + $var_count);
+                        # FAILURE 1: READ POSITION
+                        if ( $var_pos < $this->{'_min_read_pos'} ) { $t_filtered_file_fh->print( "$line\t$ref_pos\t$var_pos\t$ref_strandedness\t$var_strandedness\tReadPos<$this->{'_min_read_pos'}\n" ); }
+                        # FAILURE 2: Variant is strand-specific but reference is NOT strand-specific
+                        elsif ( ($var_strandedness < $this->{'_min_strandedness'} || $var_strandedness > $this->{'_max_strandedness'}) && ($ref_strandedness >= $this->{'_min_strandedness'} && $ref_strandedness <= $this->{'_max_strandedness'}) ) {
+                            $t_filtered_file_fh->print( "$line\t$ref_pos\t$var_pos\t$ref_strandedness\t$var_strandedness\tStrandedness: Ref=$ref_strandedness Var=$var_strandedness\n" ); }
+                        # FAILURE : Variant allele count does not meet minimum
+                        elsif ( $var_count < $this->{'_min_var_count'} ) { $t_filtered_file_fh->print( "$line\t$ref_pos\t$var_pos\t$ref_strandedness\t$var_strandedness\tVarCount:$var_count\n" ); }
+                        # FAILURE : Variant allele frequency does not meet minimum
+                        elsif ( $var_freq < $this->{'_min_var_freq'} ) { $t_filtered_file_fh->print( "$line\t$ref_pos\t$var_pos\t$ref_strandedness\t$var_strandedness\tVarFreq:$var_freq\n" ); }
+                        # FAILURE 3: Paralog filter for sites where variant allele mismatch-quality-sum is significantly higher than reference allele mmqs
+                        elsif ( $mismatch_qualsum_diff > $this->{'_max_mm_qualsum_diff'} ) { $t_filtered_file_fh->print( "$line\t$ref_pos\t$var_pos\t$ref_strandedness\t$var_strandedness\tMismatchQualsum:$var_mmqs-$ref_mmqs=$mismatch_qualsum_diff\n" ); }
+                        # FAILURE 4: Mapping quality difference exceeds allowable maximum
+                        elsif ( $mapqual_diff > $this->{'_max_mapqual_diff'} ) { $t_filtered_file_fh->print( "$line\t$ref_pos\t$var_pos\t$ref_strandedness\t$var_strandedness\tMapQual:$ref_map_qual-$var_map_qual=$mapqual_diff\n" ); }
+                        # FAILURE 5: Read length difference exceeds allowable maximum 
+                        elsif ( $readlen_diff > $this->{'_max_readlen_diff'} ) { $t_filtered_file_fh->print( "$line\t$ref_pos\t$var_pos\t$ref_strandedness\t$var_strandedness\tReadLen:$ref_avg_rl-$var_avg_rl=$readlen_diff\n" ); }
+                        # FAILURE 5: Read length difference exceeds allowable maximum
+                        elsif ( $var_dist_3 < $this->{'_min_var_dist_3'} ) { $t_filtered_file_fh->print( "$line\t$ref_pos\t$var_pos\t$ref_strandedness\t$var_strandedness\tVarDist3:$var_dist_3\n" ); }
+                        elsif ( $this->fails_homopolymer_check( $this->{'_reference_file'}, $this->{'_min_homopolymer'}, $chrom, $chr_start, $chr_stop, $ref, $var ) ) { $t_filtered_file_fh->print( "$line\t$ref_pos\t$var_pos\t$ref_strandedness\t$var_strandedness\tHomopolymer\n" ); }
+                        elsif ( $this->{'_max_var_mm_qualsum'} && $var_mmqs > $this->{'_max_var_mm_qualsum'} ) { $t_filtered_file_fh->print( "$line\t$ref_pos\t$var_pos\t$ref_strandedness\t$var_strandedness\tVarMMQS: $var_mmqs > $this->{'_max_var_mm_qualsum'}\n" ); }
+                        # SUCCESS: Pass Filter
+                        else { $t_output_file_step_9_fh->print( "$line\t$ref_pos\t$var_pos\t$ref_strandedness\t$var_strandedness\t$ref_mmqs\t$var_mmqs\t$mismatch_qualsum_diff\t$ref_dist_3\t$var_dist_3\t$ref_avg_rl\t$var_avg_rl\n" ); }
+                    } else { $t_filtered_file_fh->print( "$line\tno_reads\n" ); }
+                } else { } ## TODO: Add error message control
+            }
+        } else { $t_filtered_file_fh->print( "$line\tno_allele\n" ); }
+    } # while end
+    $t_filtered_file_fh->close;
+    $t_output_file_step_9_fh->close;
+    print STDERR "STEP 9 and 10 ... DONE \n";
+    #`cp $t_filtered_file step_9_filtered_file`;
+    #`cp $t_output_file_step_9 step_9_output_file`;
+    #
+    # step 10:
+    # PURPOSE: mop-up remaining false-positives
+    #
+    my $p_germ_a_priori = 1/1300; # rough number from Lander et al (2001) for wgs
+    my $p_somatic_a_priori = 0.0000015;
+    my $p_paralog_x_a_priori = 0.001;
+    my $q_avg = 24;
+    my ( $rho_n, $rho_t ) = ( 72, 36 );
+    my ( $p_n, $p_t ) = ( 0.96, 0.85 );
+    my $pbf_ref_step9 = PBF->new();
+
+    $pbf_ref_step9->set_germline_constants( $q_avg, $p_somatic_a_priori, $p_germ_a_priori, $p_n, $p_t );
+    $pbf_ref_step9->set_paralog_constants( $rho_n, $rho_t, $p_paralog_x_a_priori );
+
+    my $final_output_file_fh = IO::File->new( $this->{'_output_file'}, ">" ) or die "can not open final filtered output file $!";
+    $t_output_file_step_9_fh = IO::File->new( $t_output_file_step_9 ) or die "can not open temp output file of step 9 for reading $!";
+    $final_output_file_fh->print( "# BASSOVAC CALLS REMAINING AFTER LINEAR DISCRIMINANT ANALYSIS\n#\n" );
+    $final_output_file_fh->print( "#\n#\n", "#  ", "-" x 60, "\n" );
+    my ( $discriminant_data, $paralogs, $germlines ) = ({}, (), ());
+    while ( <$t_output_file_step_9_fh> ) {
+        next if /^#/; chomp; my @fields = split /\t/;
+        my $pval_bassovac_het = $fields[13]; # HET ONLY
+        my ( $normal_total, $normal_ref ) = ( $fields[8], $fields[9] );
+        my ( $tumor_total, $tumor_ref ) = ( $fields[10], $fields[11] );
+        my $nvaf_bass = ( $normal_total - $normal_ref) / $normal_total;
+        my $tvaf_bass = ( $tumor_total - $tumor_ref) / $tumor_total;
+        #__DIAGNOSTICS FROM THE GMT FILTER-FALSE-POSITIVES CALCULATION
+        my $avg_read_pos_ref = $fields[17];
+        my $avg_read_pos_var = $fields[18];
+        my $strandedness_ref = $fields[19];
+        my $strandedness_var = $fields[20];
+        my $mm_qualsum_ref = $fields[21];
+        my $mm_qualsum_var = $fields[22];
+        my $mm_qualsum_diff = $fields[23];
+        my $dist_3_ref = $fields[24];
+        my $dist_3_var = $fields[25];
+        my $soft_trim_length_ref = $fields[26];
+        my $soft_trim_length_var = $fields[27];
+        #__CALCULATE THE POSTERIOR "FILTER" PROBABILITY OF BEING A PARALOG
+        my $prob_paralog = $pbf_ref_step9->posterior_prob_paralog( $normal_total, $tumor_total );
+        #__CALCULATE THE POSTERIOR "FILTER" PROBABILITY OF BEING GERMLINE USING
+        #  BOTH TUMOR *AND* NORMAL --- BEST FOR LDA
+        my $prob_germline = $pbf_ref_step9->posterior_prob_germline( $normal_total, $normal_ref, $tumor_total, $tumor_ref, $tvaf_bass );
+        my $lda_function_value =  22.9618206076398 * $nvaf_bass
+                                   - 2.41150491178029 * $tvaf_bass
+                                   - 4.56040890545829 * $pval_bassovac_het
+                                   + 9.48636367117283 * $prob_germline
+                                   - 3.29949870998196 * $avg_read_pos_var
+                                   + 0.0319955244987085 * $mm_qualsum_ref
+                                   + 0.00692880368599794 * $mm_qualsum_var
+                                   + 0.00553992596011047 * $mm_qualsum_diff
+                                   - 0.0152439930077851 * $soft_trim_length_ref
+                                   - 0.0911335568384488 * $soft_trim_length_var;
+        $fields[1] -= 1;
+        $final_output_file_fh->print( join( "\t", @fields )."\n" ) if $lda_function_value < -14.8;
+    }
+    $final_output_file_fh->close;
+    $t_output_file_step_9_fh->close;
+
+    return 1;
+}
+
+# homopolymer checking
+sub fails_homopolymer_check {
+    my ( $this, $reference, $min_homopolymer, $chrom, $chr_start, $chr_stop, $ref, $var ) = @_;
+    # Auto-pass large indels
+    my $indel_size = length( $ref );
+    $indel_size = length( $var ) if ( length($var) > $indel_size );
+    return(0) if ( $indel_size > 2 );
+    # Build strings of homopolymer bases
+    my $homoRef = $ref x $min_homopolymer;
+    my $homoVar = $var x $min_homopolymer;
+    # Build a query string for the homopolymer check
+    my $query_string = $chrom . ":" . ($chr_start - $min_homopolymer) . "-" . ($chr_stop + $min_homopolymer);
+    my $sequence = `samtools faidx $reference $query_string | grep -v \">\"`;
+    chomp( $sequence );
+    if ( $sequence ) { if ( $sequence =~ $homoVar ) { return( $sequence ); } }
+
+    return(0);
+}
+
+# Read_Counts_By_Allele - parse out readcount 
+# info for an allele
+sub read_counts_by_allele {
+    my ( $this, $line, $allele ) = @_;
+    map {
+        my @alleleContents = split /\:/;
+        if ( $alleleContents[0] eq $allele ) {
+            my $numAlleleContents = @alleleContents;
+            return( "" ) if ( $numAlleleContents < 8 );
+            my $return_string = "";
+            my $return_sum = 0;
+            shift @alleleContents;
+            map { 
+                $return_sum += $_;
+                $return_string .= "\t" if ( $return_string );
+                $return_string .= $_;;
+            } @alleleContents;
+            return( $return_string );
+        }
+    } split /\t/, $line;
+
+    return( "" );
+}
+
+# Found the function using map does not work 
+# so, using old function
+sub read_counts_by_allele_old {
+    my ( $this, $line, $allele ) = @_;
+    my @lineContents = split( /\t/, $line );
+    my $numContents = @lineContents;
+    for ( my $colCounter = 5; $colCounter < $numContents; $colCounter++ ) {
+        my $this_allele = $lineContents[$colCounter];
+        my @alleleContents = split(/\:/, $this_allele);
+        if ( $alleleContents[0] eq $allele ) {
+            my $numAlleleContents = @alleleContents;
+            return("") if ( $numAlleleContents < 8 );
+            my $return_string = "";
+            my $return_sum = 0;
+            for ( my $printCounter = 1; $printCounter < $numAlleleContents; $printCounter++ ) {
+                $return_sum += $alleleContents[$printCounter];
+                $return_string .= "\t" if($return_string);
+                $return_string .= $alleleContents[$printCounter];
+            }
+            return( $return_string );
+        }
+    }
+    return("");
+}
+
+# scan the lines of the readcount file 
+# until the matching line is found
+sub get_readcount_line {
+    my ( $this, $readcount_fh, $chr, $start ) = @_;
+    while ( my $line = $readcount_fh->getline ) {
+        chomp $line;
+        my ( $rc_chr, $rc_pos ) = split "\t", $line;
+        if ( ($chr eq $rc_chr) && ($start == $rc_pos) ) { return $line; }
+    }
+    return;
+}
+
+# parse block for var
+sub iupac_to_base {
+    my ( $this, $allele1, $allele2 ) = @_;
+    return( $allele2 ) if ( $allele2 eq "A" || $allele2 eq "C" || $allele2 eq "G" || $allele2 eq "T" );
+    if ( $allele2 eq "M" ) {
+        return("C") if ( $allele1 eq "A" );
+        return("A") if ( $allele1 eq "C" );
+        ## Default for triallelic variant
+        return("A");
+    } elsif ( $allele2 eq "R" ) {
+        return("G") if ( $allele1 eq "A" );
+        return("A") if ( $allele1 eq "G" );
+        ## Default for triallelic variant
+        return("A");
+    } elsif ( $allele2 eq "W" ) {
+        return("T") if ( $allele1 eq "A" );
+        return("A") if ( $allele1 eq "T" );
+        ## Default for triallelic variant
+        return("A");
+    } elsif ( $allele2 eq "S" ) {
+        return("C") if ( $allele1 eq "G" );
+        return("G") if ( $allele1 eq "C" );
+        ## Default for triallelic variant
+        return("C");
+    } elsif ( $allele2 eq "Y" ) {
+        return("C") if ( $allele1 eq "T" );
+        return("T") if ( $allele1 eq "C" );
+        ## Default for triallelic variant
+        return("C");
+    } elsif ( $allele2 eq "K" ) {
+        return("G") if ( $allele1 eq "T" );
+        return("T") if ( $allele1 eq "G" );
+        ## Default for triallelic variant
+        return("G");
     }
 
-    #
-    return 1;
+    return( $allele2 );
 }
 
 # remove tier 4 calls
 sub tier3_calls_removing {
-    my ( $this, $bassovac_results ) = @_;
+    my ( $this, $bassovac_results, $t1_bed, $t2_bed, $t3_bed, $t4_bed ) = @_;
     my ( undef, $t_bed_file ) = tempfile();
     unless( $t_bed_file ) { die " could not create temp bed file $!" };
     my $t_bed_file_fh = IO::File->new( $t_bed_file, ">" ) or die "Temporary file could not be created. $!";
@@ -477,11 +1138,76 @@ sub tier3_calls_removing {
     } $bassovac_result_fh->getlines;
     $t_bed_file_fh->close;
     $bassovac_result_fh->close;
-
-
+    #`cp $t_bed_file t.bed.file`;
+    my ( undef, $insert_file ) = tempfile();
+    unless ( $insert_file ) { die "can not create temp insertion file !\n" };    
+    my @t_tier_files = map { 
+        my ( undef, $t_tier_file ) = tempfile();
+        unless( $t_tier_file ) { die "can not create temp tier file !\n" };   
+        $t_tier_file; 
+    } (1..4);
+    my $t1_cmd = "joinx intersect -f -o ".$t_tier_files[0]." -a ".$t_bed_file." -b ".$t1_bed." --miss-a - ";
+    my $t2_cmd = "joinx intersect -f -o ".$t_tier_files[1]." -a - -b ".$t2_bed." --miss-a - ";
+    my $t3_cmd = "joinx intersect -f -o ".$t_tier_files[2]." -a - -b ".$t3_bed." --miss-a - ";
+    my $t4_cmd = "joinx intersect -f -o ".$t_tier_files[3]." -a - -b ".$t4_bed." --miss-a - ";
+    my $cmd = $t1_cmd . " | " . $t2_cmd . " | " . $t3_cmd . " | " . $t4_cmd . " > " . $insert_file;
+    print STDERR "RUN: $cmd\n";
+    WIFEXITED( system $cmd ) or croak "Couldn't run: $cmd ($?)";
+    my @t_insert_files = map { 
+        my ( undef, $t_insert_file ) = tempfile();
+        unless( $t_insert_file ) { die "can not create temp insert file !\n" };   
+        $t_insert_file; 
+    } (1..4);
+    my @t_output_files = map { 
+        my ( undef, $t_output_file ) = tempfile();
+        unless( $t_output_file ) { die "can not create temp tier output file !\n" };   
+        $t_output_file; 
+    } (1..4);
+    if ( -s $insert_file ) {
+        $t4_cmd = "joinx intersect --adjacent-insertions -f -o ".$t_insert_files[3]." -a ".$insert_file." --miss-a - ";
+        $t3_cmd = "joinx intersect --adjacent-insertions -f -o ".$t_insert_files[2]." -a - -b ".$t3_bed." --miss-a - ";
+        $t2_cmd = "joinx intersect --adjacent-insertions -f -o ".$t_insert_files[1]." -a - -b ".$t2_bed." --miss-a - ";
+        $t1_cmd = $t_insert_files[0];
+        $cmd = $t4_cmd . " | " . $t3_cmd . " | " . $t2_cmd . " > " . $t1_cmd;
+        WIFEXITED( system $cmd ) or croak "Couldn't run: $cmd ($?)";
+        map {
+            my $t_tier_number = $_ - 1;
+            my $t_cmd = "joinx sort --stable --merge-only $t_tier_files[$t_tier_number] $t_insert_files[$t_tier_number] -o $t_output_files[$t_tier_number]";
+            WIFEXITED( system $t_cmd ) or croak "Couldn't run: $t_cmd ($?)";
+        } (1..4);
+    } else { @t_output_files = @t_tier_files; }
+    # cat tier 123 results
+    my ( undef, $t_cat123_output_file ) = tempfile();
+    $cmd = "cat ".join(" ", @t_output_files[0..2])." | joinx sort > $t_cat123_output_file";
+    WIFEXITED( system $cmd ) or croak "Couldn't run: $cmd ($?)";
+    # bassovac bass
+    # bed: seed
+    my ( %seed, $total_seed, $total_bass ) = ( (), 0, 0 );
+    my $t_cat123_fh = IO::File->new( $t_cat123_output_file ) or die "can not open tier[123] file. $!";
+    map { unless( /^#/ ) { 
+            chomp;
+            my ( $chr, $pos ) = (split /\t/)[0,2];
+            $chr =~ s/\s+$//; $pos =~ s/\s+$//;
+            $seed{$chr}{$pos} = 1;
+            $total_seed++;
+        }
+    } $t_cat123_fh->getlines;
+    $t_cat123_fh->close;
+    my ( undef, $return_output_file ) = tempfile();
+    unless( $return_output_file ) { die " could not create temp return output file $!" };
+    my $return_output_file_fh = IO::File->new( $return_output_file, ">" ) or die "Temporary file could not be created. $!";
+    $bassovac_result_fh = IO::File->new( $bassovac_results ) or die "can not open bassovac output file. $!";
+    map { unless( /^#/ ) {
+            my ( $chr, $pos ) = (split /\t/)[0,2];
+            $chr =~ s/\s+$//; $pos =~ s/\s+$//;
+            if ( defined $seed{$chr}{$pos} ) { $return_output_file_fh->print( $_ ); $total_bass++; }
+        }
+    } $bassovac_result_fh->getlines;
+   die "SEED FILE NOT FULLY INFLATED" unless $total_bass == $total_seed;
+   $bassovac_result_fh->close;
+   $return_output_file_fh->close;
+   return ( $return_output_file, $t_cat123_output_file );
 }
-
-
 
 
 sub help_text {
@@ -495,6 +1221,13 @@ Help:
 
 Required Arguments:
   --union-file [list]        List of files to unionize
+  --dbSNP-file               dbSNP bed file  
+  --output-file              Final filtered output file
+  --indel-file               Indel file ( required if --remove-indel-calls )
+  --tier1-bed                Tier1 bed file ( required if --remove-tier4-calls ) 
+  --tier2-bed                Tier2 bed file ( required if --remove-tier4-calls ) 
+  --tier3-bed                Tier3 bed file ( required if --remove-tier4-calls )
+  --tier4-bed                Tier4 bed file ( required if --remove-tier4-calls )
 
 Optional Arguments:
   --union-file-type          Type of file to take unions of, either
@@ -512,6 +1245,105 @@ Optional Arguments:
                               Defult value 'true' if not specified
 
   --noremove-tier4-calls     Make --remove-tier4-calls false
+
+  --remove-indel-calls       Remove all calls near indels
+                              Defult value 'true' if not specified
+
+  --noremove-indel-calls     Make --remove-indel-calls false
+
+
+  PARALOG (DEPTH) FILTER:
+  --filter-paralog           Turn on (run) the paralog filter
+                              Defult value 'true' if not specified
+
+  --nofilter-paralog         Make --filter-paralog false
+
+  --threshold-paralog        Threshold posterior probability above which an event is
+                              taken to be a paralog and is thus discarded from the
+                              Default value '0.3' if not specified
+
+  --redundancy-normal        Average depth of your data, for normal sample, e.g. '30' 
+                              denotes that your input file resulted from running 
+                              Bassovac on a 30X data
+                              Default value '72' if not specified
+
+  --redundancy-tumor         Average depth of your data, for tumor sample, e.g. '30' 
+                              denotes that your input file resulted from running 
+                              Bassovac on a 30X data
+                              Default value '36' if not specified
+
+  --paralog-x-rate           A-priori probability that a position in the genome is in 
+                              a paralogous region and that its nucleotide differs from 
+                              its counterpart
+                              Default value '0.001' if not specified
+
+                              
+  GERMLINE FILTER:
+  --filter-germline          Turn on (run) the germline filter
+                              Default value 'true' if not specified
+
+  --nofilter-germline        Make --filter-germline false
+
+  --threshold-germline       Threshold posterior probability above which an event is
+                              is taken to be germline and is thus discarded from 
+                              the data set
+                              Default value '0.5' if not specified
+
+  --germline-snp-rate        A-priori probability of a germline event in whole
+                              genome sequence 
+                              Default value '0.000769230769230769' if not specified
+
+  --tumor-bg-rate            A-priori probability of a somatic event i.e. background
+                              mutation rate (default 1e-06)
+                              Default value '0.000001' if not specified
+
+  --normal-purity            The normal sample purity
+                              Default value '0.95' if not specified
+
+  --tumor-purity             The tumor sample purity
+                              Default value '0.85' if not specified
+
+  --avg-basequal             The average base quality expected at each site;
+                              currently base qualities are not read locally for each
+                              site (though this would be better and will be done at
+                              some point), so set this somewhat higher than the
+                              --min-basequal of the Bassovac run, for example set 23
+                              if you used '--min-basequal 20'
+                              Default value '28' if not specified
+
+                              
+  TRADITIONAL FILTER:
+  --tumor-bam-file           Sorted .bam file containing tumor reads
+
+  --reference-file           Reference sequence file
+
+  --min-read-pos             Minimum average relative distance from start/end of read
+                              Default value '0.10' if not specified
+
+  --min-strandedness         Minimum representation of variant allele on each strand
+                              Default value '0.01' if not specified
+
+  --min-var-count            Minimum number of variant-supporting reads
+                              Default value '1' if not specified
+
+  --max-mm-qualsum-diff      Maximum difference of mismatch quality sum between variant 
+                              and reference reads (paralog filter)
+                              Default value '50' if not specified 
+
+  --min-var-freq             Minimum variant allele frequency
+                              Default value '0.005' if not specified
+
+  --max-mapqual-diff         Maximum difference of mapping quality between variant and 
+                              reference reads
+                              Default value '20' if not specified
+
+  --max-var-mm-qualsum       Maximum mismatch quality sum of reference-supporting reads
+                              Default value '90' if not specified
+
+  --max-readlen-diff         Maximum difference of average supporting read length between variant 
+                              and reference reads (paralog filter)
+                              Default value '25' if not specified
+
 
 
 HELP
