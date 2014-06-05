@@ -42,7 +42,9 @@ sub new {
                    '_normal_hom_rate'    => 0.0005, 
                    '_tumor_bg_rate'      => 0.000002, 
                    '_min_somatic_pvalue' => 0,
-                   '_max_depth'          => 1000000 );
+                   '_max_depth'          => 1000000,
+		   '_region'             => '');
+
     # bool args
     $this->{'bo_args'}->{'_fixed'} = undef;
     map{ $this->{'op_args'}->{$_} = $op_args{$_} } keys %op_args;
@@ -74,6 +76,7 @@ sub process {
         'min-somatic-pvalue=f'   => \$this->{'op_args'}->{'_min_somatic_pvalue'},
         'max-depth=i'            => \$this->{'op_args'}->{'_max_depth'},
         'fixed'                  => \$this->{'bo_args'}->{'_fixed'},
+	'region=s'               => \$this->{'op_args'}->{'_region'},
 
         'help-format'   => \$help_format,
         'help' => \$help,
@@ -123,6 +126,8 @@ Required Arguments:
 
 Optional Arguments:
   --output-file          output file (empty or - means stdout, which is the default)
+  --region               Region in which to call variants
+                         (e.g., 7  or  20:15000000-20000000)
   --bins                 Maximum number of p-value bins to use
                          Default value '2' if not specified
   --min-mapqual          Minimum mapping quality for reads
